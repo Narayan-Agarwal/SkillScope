@@ -141,4 +141,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 ## Author
 
 **Narayan Agarwal**  
-CSE 2026 — VSSUT Burla
+Department of Computer Science and Engineering  
+B.Tech 2023–2027  
+Veer Surendra Sai University of Technology, Burla
