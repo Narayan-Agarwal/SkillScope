@@ -1,0 +1,12 @@
+data/kaggle_raw.csv
+data/skillscope.db
+data/pipeline.log
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+*.egg-info/
+.hypothesis/
+.kiro/
