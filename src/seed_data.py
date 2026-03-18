@@ -1,5 +1,7 @@
 """
-Data pipeline for SkillScope — downloads, cleans, and seeds the SQLite database.
+Data pipeline for SkillScope.
+Strategy: Adzuna API first (company + role queries), then guaranteed fallback for all 91 companies.
+Kaggle download is commented out — not used for seeding.
 """
 from __future__ import annotations
 
@@ -10,13 +12,10 @@ import time
 import traceback
 from typing import Any
 
-import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
+load_dotenv()
 
 os.makedirs("data", exist_ok=True)
 
@@ -27,503 +26,488 @@ logging.basicConfig(
 )
 
 # ---------------------------------------------------------------------------
+# KAGGLE DOWNLOAD — commented out, not used for seeding
+# ---------------------------------------------------------------------------
+# def download_kaggle(output_path: str) -> None:
+#     """Previously used to download LinkedIn job postings from Kaggle.
+#     Disabled: dataset is 159MB and takes too long for initial seeding.
+#     Use Adzuna API + fallback instead."""
+#     import kaggle
+#     kaggle.api.dataset_download_files(
+#         "arshkon/linkedin-job-postings",
+#         path=os.path.dirname(output_path) or ".",
+#         unzip=True,
+#     )
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 ROLE_MAPPING: dict[str, str] = {
-    # SDE
     "software engineer": "SDE",
     "software developer": "SDE",
     "sde": "SDE",
-    "sde-1": "SDE",
-    "sde-2": "SDE",
-    "senior sde": "SDE",
-    # Frontend Developer
     "frontend engineer": "Frontend Developer",
-    "ui developer": "Frontend Developer",
-    "react developer": "Frontend Developer",
     "frontend developer": "Frontend Developer",
-    # Backend Developer
+    "react developer": "Frontend Developer",
+    "ui developer": "Frontend Developer",
     "backend engineer": "Backend Developer",
     "backend developer": "Backend Developer",
-    "api developer": "Backend Developer",
     "node.js developer": "Backend Developer",
-    # Full Stack Developer
     "full stack engineer": "Full Stack Developer",
     "full stack developer": "Full Stack Developer",
-    "mean stack developer": "Full Stack Developer",
-    "mern stack developer": "Full Stack Developer",
-    # Data Analyst
     "data analyst": "Data Analyst",
     "bi analyst": "Data Analyst",
-    "senior data analyst": "Data Analyst",
-    # Data Scientist
     "data scientist": "Data Scientist",
-    "senior data scientist": "Data Scientist",
     "applied scientist": "Data Scientist",
-    # ML Engineer
     "machine learning engineer": "ML Engineer",
     "ml engineer": "ML Engineer",
-    "ai/ml engineer": "ML Engineer",
     "mlops engineer": "ML Engineer",
-    # DevOps Engineer
     "devops engineer": "DevOps Engineer",
     "site reliability engineer": "DevOps Engineer",
     "sre": "DevOps Engineer",
-    "platform engineer": "DevOps Engineer",
-    # Cloud Engineer
     "cloud engineer": "Cloud Engineer",
     "cloud architect": "Cloud Engineer",
-    "aws engineer": "Cloud Engineer",
-    "azure engineer": "Cloud Engineer",
-    # Business Analyst
     "business analyst": "Business Analyst",
-    "functional analyst": "Business Analyst",
-    # Product Manager
     "product manager": "Product Manager",
-    "pm": "Product Manager",
     "product owner": "Product Manager",
-    # QA Engineer
     "qa engineer": "QA Engineer",
-    "quality assurance engineer": "QA Engineer",
     "test engineer": "QA Engineer",
     "sdet": "QA Engineer",
-    # Cybersecurity Analyst
     "cybersecurity analyst": "Cybersecurity Analyst",
     "security analyst": "Cybersecurity Analyst",
-    "soc analyst": "Cybersecurity Analyst",
-    # System Administrator
     "system administrator": "System Administrator",
     "sysadmin": "System Administrator",
-    "it administrator": "System Administrator",
-    # Game Developer
     "game developer": "Game Developer",
     "unity developer": "Game Developer",
-    "unreal developer": "Game Developer",
 }
 
-VALID_ROLES: set[str] = set(ROLE_MAPPING.values()) | {"Other"}
+NORMALIZED_ROLES = [
+    "SDE", "Frontend Developer", "Backend Developer", "Full Stack Developer",
+    "Data Analyst", "Data Scientist", "ML Engineer", "DevOps Engineer",
+    "Cloud Engineer", "Business Analyst", "Product Manager", "QA Engineer",
+    "Cybersecurity Analyst", "System Administrator", "Game Developer",
+]
 
 COMPANY_TIER_MAP: dict[str, str] = {
-    # Product
-    "Google": "Product",
-    "Microsoft": "Product",
-    "Amazon": "Product",
-    "Meta": "Product",
-    "Apple": "Product",
-    "Adobe": "Product",
-    "Salesforce": "Product",
-    "Oracle": "Product",
-    "IBM": "Product",
-    "Nvidia": "Product",
-    "Cisco": "Product",
-    # Indian IT
-    "TCS": "Indian IT",
-    "Infosys": "Indian IT",
-    "Wipro": "Indian IT",
-    "HCL Technologies": "Indian IT",
-    "Cognizant": "Indian IT",
-    "Accenture": "Indian IT",
-    "Capgemini": "Indian IT",
-    "Tech Mahindra": "Indian IT",
-    "Mphasis": "Indian IT",
-    "Hexaware": "Indian IT",
-    "LTIMindtree": "Indian IT",
-    "Persistent Systems": "Indian IT",
-    "Cyient": "Indian IT",
-    "Birlasoft": "Indian IT",
-    "Coforge": "Indian IT",
-    "Zensar Technologies": "Indian IT",
-    "Mastech Digital": "Indian IT",
+    "Google": "Product", "Microsoft": "Product", "Amazon": "Product",
+    "Meta": "Product", "Apple": "Product", "Adobe": "Product",
+    "Salesforce": "Product", "Oracle": "Product", "IBM": "Product",
+    "Nvidia": "Product", "Cisco": "Product",
+    "TCS": "Indian IT", "Infosys": "Indian IT", "Wipro": "Indian IT",
+    "HCL Technologies": "Indian IT", "Cognizant": "Indian IT",
+    "Accenture": "Indian IT", "Capgemini": "Indian IT",
+    "Tech Mahindra": "Indian IT", "Mphasis": "Indian IT",
+    "Hexaware": "Indian IT", "LTIMindtree": "Indian IT",
+    "Persistent Systems": "Indian IT", "Cyient": "Indian IT",
+    "Birlasoft": "Indian IT", "Coforge": "Indian IT",
+    "Zensar Technologies": "Indian IT", "Mastech Digital": "Indian IT",
     "NIIT Technologies": "Indian IT",
-    # Startup
-    "Razorpay": "Startup",
-    "CRED": "Startup",
-    "Swiggy": "Startup",
-    "Zomato": "Startup",
-    "Paytm": "Startup",
-    "PhonePe": "Startup",
-    "Meesho": "Startup",
-    "Zepto": "Startup",
-    "Blinkit": "Startup",
-    "Groww": "Startup",
-    "Zerodha": "Startup",
-    "Navi": "Startup",
-    "Slice": "Startup",
-    "Urban Company": "Startup",
-    "OYO": "Startup",
-    "MakeMyTrip": "Startup",
-    "Ola": "Startup",
-    "Rapido": "Startup",
+    "Razorpay": "Startup", "CRED": "Startup", "Swiggy": "Startup",
+    "Zomato": "Startup", "Paytm": "Startup", "PhonePe": "Startup",
+    "Meesho": "Startup", "Zepto": "Startup", "Blinkit": "Startup",
+    "Groww": "Startup", "Zerodha": "Startup", "Navi": "Startup",
+    "Slice": "Startup", "Urban Company": "Startup", "OYO": "Startup",
+    "MakeMyTrip": "Startup", "Ola": "Startup", "Rapido": "Startup",
     "Porter": "Startup",
-    # EdTech
-    "BYJU'S": "EdTech",
-    "Unacademy": "EdTech",
-    "Vedantu": "EdTech",
-    "upGrad": "EdTech",
-    "Scaler": "EdTech",
-    "Physics Wallah": "EdTech",
-    "Simplilearn": "EdTech",
-    "Great Learning": "EdTech",
-    "Coding Ninjas": "EdTech",
-    "InterviewBit": "EdTech",
-    "Coursera India": "EdTech",
-    "Toppr": "EdTech",
-    "Classplus": "EdTech",
-    "Teachmint": "EdTech",
-    # Esports
-    "Nodwin Gaming": "Esports",
-    "WinZO": "Esports",
-    "MPL": "Esports",
-    "Dream11": "Esports",
-    "Games24x7": "Esports",
-    "Nazara Technologies": "Esports",
-    "Rooter": "Esports",
-    "Krafton India": "Esports",
-    "nCore Games": "Esports",
-    "Ubisoft India": "Esports",
-    "EA India": "Esports",
-    # Consulting
-    "Deloitte": "Consulting",
-    "EY": "Consulting",
-    "KPMG": "Consulting",
-    "McKinsey": "Consulting",
-    "BCG": "Consulting",
-    "Bain & Company": "Consulting",
-    "PwC": "Consulting",
-    "Gartner": "Consulting",
-    "Mu Sigma": "Consulting",
-    "Tiger Analytics": "Consulting",
-    "Fractal Analytics": "Consulting",
-    "LatentView Analytics": "Consulting",
-    "Bridgei2i": "Consulting",
-    "Absolutdata": "Consulting",
-    "Indegene": "Consulting",
-    "ZS Associates": "Consulting",
-    "Kantar": "Consulting",
+    "BYJU'S": "EdTech", "Unacademy": "EdTech", "Vedantu": "EdTech",
+    "upGrad": "EdTech", "Scaler": "EdTech", "Physics Wallah": "EdTech",
+    "Simplilearn": "EdTech", "Great Learning": "EdTech",
+    "Coding Ninjas": "EdTech", "InterviewBit": "EdTech",
+    "Coursera India": "EdTech", "Toppr": "EdTech",
+    "Classplus": "EdTech", "Teachmint": "EdTech",
+    "Nodwin Gaming": "Esports", "WinZO": "Esports", "MPL": "Esports",
+    "Dream11": "Esports", "Games24x7": "Esports",
+    "Nazara Technologies": "Esports", "Rooter": "Esports",
+    "Krafton India": "Esports", "nCore Games": "Esports",
+    "Ubisoft India": "Esports", "EA India": "Esports",
+    "Deloitte": "Consulting", "EY": "Consulting", "KPMG": "Consulting",
+    "McKinsey": "Consulting", "BCG": "Consulting",
+    "Bain & Company": "Consulting", "PwC": "Consulting",
+    "Gartner": "Consulting", "Mu Sigma": "Consulting",
+    "Tiger Analytics": "Consulting", "Fractal Analytics": "Consulting",
+    "LatentView Analytics": "Consulting", "Bridgei2i": "Consulting",
+    "Absolutdata": "Consulting", "Indegene": "Consulting",
+    "ZS Associates": "Consulting", "Kantar": "Consulting",
     "Nielsen": "Consulting",
 }
 
-VALID_TIERS: set[str] = {"Product", "Indian IT", "Startup", "EdTech", "Esports", "Consulting", "Other"}
+# ---------------------------------------------------------------------------
+# Comprehensive fallback skill data — guaranteed, no API needed
+# ---------------------------------------------------------------------------
 
-# Company name variant normalization
-COMPANY_NAME_VARIANTS: dict[str, str] = {
-    "Google LLC": "Google",
-    "Amazon.com": "Amazon",
-    "Meta Platforms": "Meta",
-    "Apple Inc": "Apple",
-}
-
-INDUSTRY_STANDARD_FALLBACK: dict[str, Any] = {
+FALLBACK_SKILLS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "Product": {
         "SDE": [
-            ("Python", "Programming"),
-            ("Java", "Programming"),
-            ("System Design", "Tools & Practices"),
-            ("AWS", "Cloud & DevOps"),
-            ("Docker", "Cloud & DevOps"),
+            ("Python", "Programming"), ("Java", "Programming"), ("Go", "Programming"),
+            ("System Design", "Tools_and_Practices"), ("AWS", "Cloud_and_DevOps"),
+            ("Docker", "Cloud_and_DevOps"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("React", "Web"), ("PostgreSQL", "Database"), ("Redis", "Database"),
         ],
         "Data Scientist": [
-            ("Python", "Programming"),
-            ("TensorFlow", "Data & ML"),
-            ("SQL", "Data & ML"),
-            ("Pandas", "Data & ML"),
+            ("Python", "Programming"), ("TensorFlow", "Data_and_ML"),
+            ("PyTorch", "Data_and_ML"), ("SQL", "Database"),
+            ("Pandas", "Data_and_ML"), ("Scikit-learn", "Data_and_ML"),
+            ("Spark", "Data_and_ML"), ("Tableau", "Tools_and_Practices"),
+            ("Statistics", "Data_and_ML"), ("Machine Learning", "Data_and_ML"),
+        ],
+        "ML Engineer": [
+            ("Python", "Programming"), ("TensorFlow", "Data_and_ML"),
+            ("PyTorch", "Data_and_ML"), ("MLflow", "Tools_and_Practices"),
+            ("Docker", "Cloud_and_DevOps"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("AWS SageMaker", "Cloud_and_DevOps"), ("Spark", "Data_and_ML"),
+            ("Feature Engineering", "Data_and_ML"), ("Model Deployment", "Data_and_ML"),
+        ],
+        "DevOps Engineer": [
+            ("Docker", "Cloud_and_DevOps"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("Terraform", "Cloud_and_DevOps"), ("AWS", "Cloud_and_DevOps"),
+            ("CI/CD", "Tools_and_Practices"), ("Jenkins", "Tools_and_Practices"),
+            ("Linux", "Tools_and_Practices"), ("Python", "Programming"),
+            ("Prometheus", "Tools_and_Practices"), ("Grafana", "Tools_and_Practices"),
+        ],
+        "Frontend Developer": [
+            ("React", "Web"), ("TypeScript", "Programming"), ("JavaScript", "Programming"),
+            ("CSS", "Web"), ("HTML", "Web"), ("Redux", "Web"),
+            ("GraphQL", "Web"), ("Jest", "Tools_and_Practices"),
+            ("Webpack", "Tools_and_Practices"), ("Figma", "Tools_and_Practices"),
         ],
     },
     "Indian IT": {
         "SDE": [
-            ("Java", "Programming"),
-            ("SQL", "Data & ML"),
-            ("Agile", "Tools & Practices"),
-            ("Git", "Tools & Practices"),
+            ("Java", "Programming"), ("Python", "Programming"), ("SQL", "Database"),
+            ("Spring Boot", "Web"), ("Hibernate", "Database"),
+            ("Agile", "Tools_and_Practices"), ("Git", "Tools_and_Practices"),
+            ("REST API", "Web"), ("MySQL", "Database"), ("Maven", "Tools_and_Practices"),
+        ],
+        "Data Analyst": [
+            ("SQL", "Database"), ("Excel", "Tools_and_Practices"),
+            ("Python", "Programming"), ("Tableau", "Tools_and_Practices"),
+            ("Power BI", "Tools_and_Practices"), ("Pandas", "Data_and_ML"),
+            ("Statistics", "Data_and_ML"), ("Data Visualization", "Data_and_ML"),
+            ("ETL", "Data_and_ML"), ("JIRA", "Tools_and_Practices"),
+        ],
+        "Business Analyst": [
+            ("SQL", "Database"), ("Excel", "Tools_and_Practices"),
+            ("JIRA", "Tools_and_Practices"), ("Agile", "Tools_and_Practices"),
+            ("Requirements Gathering", "Domain_Specific"),
+            ("Stakeholder Management", "Soft_Skills"),
+            ("Power BI", "Tools_and_Practices"), ("Visio", "Tools_and_Practices"),
+            ("UAT", "Tools_and_Practices"), ("Documentation", "Soft_Skills"),
+        ],
+        "QA Engineer": [
+            ("Selenium", "Tools_and_Practices"), ("Java", "Programming"),
+            ("TestNG", "Tools_and_Practices"), ("JIRA", "Tools_and_Practices"),
+            ("SQL", "Database"), ("Postman", "Tools_and_Practices"),
+            ("Agile", "Tools_and_Practices"), ("API Testing", "Tools_and_Practices"),
+            ("Git", "Tools_and_Practices"), ("Manual Testing", "Tools_and_Practices"),
+        ],
+        "DevOps Engineer": [
+            ("Jenkins", "Tools_and_Practices"), ("Docker", "Cloud_and_DevOps"),
+            ("Linux", "Tools_and_Practices"), ("AWS", "Cloud_and_DevOps"),
+            ("Ansible", "Cloud_and_DevOps"), ("Git", "Tools_and_Practices"),
+            ("Shell Scripting", "Programming"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("CI/CD", "Tools_and_Practices"), ("Terraform", "Cloud_and_DevOps"),
         ],
     },
     "Startup": {
         "SDE": [
-            ("Python", "Programming"),
-            ("React", "Web"),
-            ("Node.js", "Web"),
-            ("PostgreSQL", "Database"),
+            ("Python", "Programming"), ("React", "Web"), ("Node.js", "Web"),
+            ("PostgreSQL", "Database"), ("Docker", "Cloud_and_DevOps"),
+            ("AWS", "Cloud_and_DevOps"), ("TypeScript", "Programming"),
+            ("Redis", "Database"), ("GraphQL", "Web"), ("Git", "Tools_and_Practices"),
+        ],
+        "Full Stack Developer": [
+            ("React", "Web"), ("Node.js", "Web"), ("Python", "Programming"),
+            ("MongoDB", "Database"), ("PostgreSQL", "Database"),
+            ("Docker", "Cloud_and_DevOps"), ("AWS", "Cloud_and_DevOps"),
+            ("TypeScript", "Programming"), ("REST API", "Web"), ("Git", "Tools_and_Practices"),
+        ],
+        "Data Scientist": [
+            ("Python", "Programming"), ("Machine Learning", "Data_and_ML"),
+            ("SQL", "Database"), ("Pandas", "Data_and_ML"),
+            ("Scikit-learn", "Data_and_ML"), ("TensorFlow", "Data_and_ML"),
+            ("Statistics", "Data_and_ML"), ("Data Visualization", "Data_and_ML"),
+            ("Spark", "Data_and_ML"), ("Airflow", "Tools_and_Practices"),
+        ],
+        "Product Manager": [
+            ("Product Roadmap", "Domain_Specific"), ("Agile", "Tools_and_Practices"),
+            ("JIRA", "Tools_and_Practices"), ("SQL", "Database"),
+            ("A/B Testing", "Data_and_ML"), ("User Research", "Domain_Specific"),
+            ("Figma", "Tools_and_Practices"), ("Analytics", "Data_and_ML"),
+            ("Stakeholder Management", "Soft_Skills"), ("OKRs", "Domain_Specific"),
+        ],
+        "DevOps Engineer": [
+            ("Docker", "Cloud_and_DevOps"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("AWS", "Cloud_and_DevOps"), ("Terraform", "Cloud_and_DevOps"),
+            ("CI/CD", "Tools_and_Practices"), ("Python", "Programming"),
+            ("Linux", "Tools_and_Practices"), ("Prometheus", "Tools_and_Practices"),
+            ("Git", "Tools_and_Practices"), ("Helm", "Cloud_and_DevOps"),
         ],
     },
     "EdTech": {
         "SDE": [
-            ("Python", "Programming"),
-            ("Django", "Web"),
-            ("PostgreSQL", "Database"),
-            ("AWS", "Cloud & DevOps"),
+            ("Python", "Programming"), ("Django", "Web"),
+            ("PostgreSQL", "Database"), ("AWS", "Cloud_and_DevOps"),
+            ("React", "Web"), ("Redis", "Database"),
+            ("Docker", "Cloud_and_DevOps"), ("REST API", "Web"),
+            ("Git", "Tools_and_Practices"), ("Celery", "Tools_and_Practices"),
+        ],
+        "Data Scientist": [
+            ("Python", "Programming"), ("Machine Learning", "Data_and_ML"),
+            ("SQL", "Database"), ("Pandas", "Data_and_ML"),
+            ("NLP", "AI_and_GenAI"), ("Recommendation Systems", "Data_and_ML"),
+            ("Scikit-learn", "Data_and_ML"), ("Statistics", "Data_and_ML"),
+            ("A/B Testing", "Data_and_ML"), ("TensorFlow", "Data_and_ML"),
+        ],
+        "Product Manager": [
+            ("Product Roadmap", "Domain_Specific"), ("Agile", "Tools_and_Practices"),
+            ("SQL", "Database"), ("User Research", "Domain_Specific"),
+            ("A/B Testing", "Data_and_ML"), ("JIRA", "Tools_and_Practices"),
+            ("Analytics", "Data_and_ML"), ("Figma", "Tools_and_Practices"),
+            ("Communication", "Soft_Skills"), ("OKRs", "Domain_Specific"),
+        ],
+        "Frontend Developer": [
+            ("React", "Web"), ("JavaScript", "Programming"),
+            ("TypeScript", "Programming"), ("CSS", "Web"),
+            ("HTML", "Web"), ("Redux", "Web"),
+            ("Jest", "Tools_and_Practices"), ("Webpack", "Tools_and_Practices"),
+            ("Git", "Tools_and_Practices"), ("Figma", "Tools_and_Practices"),
+        ],
+        "ML Engineer": [
+            ("Python", "Programming"), ("TensorFlow", "Data_and_ML"),
+            ("NLP", "AI_and_GenAI"), ("Recommendation Systems", "Data_and_ML"),
+            ("Docker", "Cloud_and_DevOps"), ("AWS", "Cloud_and_DevOps"),
+            ("Scikit-learn", "Data_and_ML"), ("Pandas", "Data_and_ML"),
+            ("MLflow", "Tools_and_Practices"), ("Spark", "Data_and_ML"),
         ],
     },
     "Esports": {
         "Game Developer": [
-            ("Unity", "Domain Specific"),
-            ("C#", "Programming"),
-            ("Unreal Engine", "Domain Specific"),
-            ("C++", "Programming"),
+            ("Unity", "Domain_Specific"), ("C#", "Programming"),
+            ("Unreal Engine", "Domain_Specific"), ("C++", "Programming"),
+            ("Game Physics", "Domain_Specific"), ("3D Modeling", "Domain_Specific"),
+            ("Multiplayer Networking", "Domain_Specific"), ("Git", "Tools_and_Practices"),
+            ("Shader Programming", "Domain_Specific"), ("Performance Optimization", "Tools_and_Practices"),
+        ],
+        "SDE": [
+            ("Python", "Programming"), ("Node.js", "Web"),
+            ("PostgreSQL", "Database"), ("Redis", "Database"),
+            ("AWS", "Cloud_and_DevOps"), ("Docker", "Cloud_and_DevOps"),
+            ("WebSockets", "Web"), ("REST API", "Web"),
+            ("Git", "Tools_and_Practices"), ("Microservices", "Cloud_and_DevOps"),
+        ],
+        "Data Analyst": [
+            ("SQL", "Database"), ("Python", "Programming"),
+            ("Tableau", "Tools_and_Practices"), ("Excel", "Tools_and_Practices"),
+            ("Game Analytics", "Domain_Specific"), ("Pandas", "Data_and_ML"),
+            ("Statistics", "Data_and_ML"), ("Power BI", "Tools_and_Practices"),
+            ("Data Visualization", "Data_and_ML"), ("A/B Testing", "Data_and_ML"),
+        ],
+        "Product Manager": [
+            ("Product Roadmap", "Domain_Specific"), ("Agile", "Tools_and_Practices"),
+            ("Game Design", "Domain_Specific"), ("User Research", "Domain_Specific"),
+            ("SQL", "Database"), ("Analytics", "Data_and_ML"),
+            ("JIRA", "Tools_and_Practices"), ("Monetization", "Domain_Specific"),
+            ("Communication", "Soft_Skills"), ("OKRs", "Domain_Specific"),
+        ],
+        "DevOps Engineer": [
+            ("Docker", "Cloud_and_DevOps"), ("Kubernetes", "Cloud_and_DevOps"),
+            ("AWS", "Cloud_and_DevOps"), ("CI/CD", "Tools_and_Practices"),
+            ("Linux", "Tools_and_Practices"), ("Python", "Programming"),
+            ("Terraform", "Cloud_and_DevOps"), ("Prometheus", "Tools_and_Practices"),
+            ("Git", "Tools_and_Practices"), ("Grafana", "Tools_and_Practices"),
         ],
     },
     "Consulting": {
         "Data Analyst": [
-            ("SQL", "Data & ML"),
-            ("Excel", "Data & ML"),
-            ("Tableau", "Data & ML"),
-            ("Python", "Programming"),
+            ("SQL", "Database"), ("Excel", "Tools_and_Practices"),
+            ("Tableau", "Tools_and_Practices"), ("Python", "Programming"),
+            ("Power BI", "Tools_and_Practices"), ("Statistics", "Data_and_ML"),
+            ("Data Visualization", "Data_and_ML"), ("Pandas", "Data_and_ML"),
+            ("Communication", "Soft_Skills"), ("Stakeholder Management", "Soft_Skills"),
+        ],
+        "Data Scientist": [
+            ("Python", "Programming"), ("Machine Learning", "Data_and_ML"),
+            ("SQL", "Database"), ("R", "Programming"),
+            ("Statistics", "Data_and_ML"), ("Tableau", "Tools_and_Practices"),
+            ("Scikit-learn", "Data_and_ML"), ("Pandas", "Data_and_ML"),
+            ("Communication", "Soft_Skills"), ("Data Visualization", "Data_and_ML"),
+        ],
+        "Business Analyst": [
+            ("SQL", "Database"), ("Excel", "Tools_and_Practices"),
+            ("Power BI", "Tools_and_Practices"), ("Tableau", "Tools_and_Practices"),
+            ("Requirements Gathering", "Domain_Specific"), ("Agile", "Tools_and_Practices"),
+            ("JIRA", "Tools_and_Practices"), ("Stakeholder Management", "Soft_Skills"),
+            ("Documentation", "Soft_Skills"), ("Process Mapping", "Domain_Specific"),
+        ],
+        "ML Engineer": [
+            ("Python", "Programming"), ("TensorFlow", "Data_and_ML"),
+            ("Scikit-learn", "Data_and_ML"), ("SQL", "Database"),
+            ("Docker", "Cloud_and_DevOps"), ("AWS", "Cloud_and_DevOps"),
+            ("MLflow", "Tools_and_Practices"), ("Pandas", "Data_and_ML"),
+            ("Statistics", "Data_and_ML"), ("Model Deployment", "Data_and_ML"),
+        ],
+        "SDE": [
+            ("Python", "Programming"), ("Java", "Programming"),
+            ("SQL", "Database"), ("REST API", "Web"),
+            ("AWS", "Cloud_and_DevOps"), ("Docker", "Cloud_and_DevOps"),
+            ("Git", "Tools_and_Practices"), ("Agile", "Tools_and_Practices"),
+            ("Microservices", "Cloud_and_DevOps"), ("Spring Boot", "Web"),
         ],
     },
 }
 
 
 # ---------------------------------------------------------------------------
-# Helper functions (exported for testing)
+# Helper functions
 # ---------------------------------------------------------------------------
 
 def normalize_role(title: str) -> str:
-    """Map a raw job title to one of the 15 Normalized_Roles or 'Other'."""
     if not title or not isinstance(title, str):
         return "Other"
     return ROLE_MAPPING.get(title.strip().lower(), "Other")
 
 
 def get_tier(company_name: str) -> str:
-    """Map a company name to one of the 6 Tiers or 'Other'."""
     if not company_name or not isinstance(company_name, str):
         return "Other"
     return COMPANY_TIER_MAP.get(company_name.strip(), "Other")
 
 
 def normalize_text(text: str) -> str:
-    """Apply title case normalization to a string."""
     return text.title()
 
 
 # ---------------------------------------------------------------------------
-# Pipeline functions
+# Step 2: Adzuna seeding — query by company + role
 # ---------------------------------------------------------------------------
 
-def download_kaggle(output_path: str) -> None:
-    """Download the LinkedIn job postings dataset from Kaggle.
-
-    Retries up to 3 times with exponential backoff (2^attempt seconds).
-    Exits with code 1 on credential failure or exhausted retries.
-    """
-    load_dotenv()
-    token = os.environ.get("KAGGLE_API_TOKEN") or os.environ.get("KAGGLE_KEY")
-
-    if not token:
-        msg = "Kaggle credential error: KAGGLE_API_TOKEN / KAGGLE_KEY not set in environment."
-        logging.error(msg)
-        print(msg, file=sys.stderr)
-        sys.exit(1)
-
-    os.environ["KAGGLE_API_TOKEN"] = token
-
-    def _attempt_download() -> None:
-        # Import kaggle here so the env var is already set
-        import kaggle  # noqa: F401 — triggers auth from env
-        from kaggle.api.kaggle_api_extended import KaggleApiExtended
-
-        api = KaggleApiExtended()
-        api.authenticate()
-
-        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-        api.dataset_download_files(
-            "arshkon/linkedin-job-postings",
-            path=os.path.dirname(output_path) or ".",
-            unzip=True,
-            quiet=False,
-            force=True,
-        )
-
-    retries = 3
-    for attempt in range(retries):
-        try:
-            _attempt_download()
-            # Find the downloaded CSV
-            base_dir = os.path.dirname(output_path) or "."
-            csv_candidates = [f for f in os.listdir(base_dir) if f.endswith(".csv")]
-            if csv_candidates:
-                # Rename/move the first CSV to the expected output_path
-                src = os.path.join(base_dir, csv_candidates[0])
-                if src != output_path:
-                    os.rename(src, output_path)
-            df = pd.read_csv(output_path)
-            print(f"Kaggle download complete. Rows: {len(df)}")
-            return
-        except SystemExit:
-            raise
-        except Exception as exc:
-            err_str = str(exc).lower()
-            if "401" in err_str or "unauthorized" in err_str or "credential" in err_str or "api key" in err_str:
-                msg = f"Kaggle credential error: {exc}"
-                logging.error(msg)
-                print(msg, file=sys.stderr)
-                sys.exit(1)
-            if attempt < retries - 1:
-                wait = 2 ** attempt
-                time.sleep(wait)
-            else:
-                msg = f"Kaggle download failed after {retries} attempts: {exc}"
-                logging.error(msg, exc_info=True)
-                print(msg, file=sys.stderr)
-                sys.exit(1)
+def fetch_adzuna_for_company_role(
+    company: str, role: str, app_id: str, app_key: str
+) -> list[dict]:
+    """Fetch up to 10 Adzuna results for a specific company + role query."""
+    query = f"{role} {company}"
+    url = (
+        f"https://api.adzuna.com/v1/api/jobs/in/search/1"
+        f"?app_id={app_id}&app_key={app_key}"
+        f"&what={requests.utils.quote(query)}&results_per_page=10"
+    )
+    try:
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 429:
+            time.sleep(2)
+            resp = requests.get(url, timeout=3)
+        if not resp.ok:
+            return []
+        return resp.json().get("results", [])
+    except Exception:
+        return []
 
 
-def load_and_clean(csv_path: str) -> pd.DataFrame:
-    """Load and clean the raw Kaggle CSV.
-
-    Steps:
-    - Normalize column names
-    - Apply company name variants
-    - Map roles and tiers
-    - Drop null/empty title+description rows
-    - Deduplicate on (company_name, role_title)
-    - Drop rows with fewer than 3 extracted skills
-    """
-    # Import here to avoid circular issues at module level
+def seed_via_adzuna(conn, app_id: str, app_key: str) -> tuple[int, int, int, set]:
+    """Query Adzuna for each company × role combination. Returns (companies, roles, skills, unique_skills)."""
     sys.path.insert(0, os.path.dirname(__file__))
+    from db import insert_job_role, insert_role_skill, upsert_company, upsert_skill_frequency
     from skill_extractor import extract_skills
 
-    df = pd.read_csv(csv_path)
+    company_count = 0
+    role_count = 0
+    skill_record_count = 0
+    unique_skills: set[str] = set()
 
-    # Normalize column names
-    df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
+    # Sample 5 roles per company to keep under 3 minutes
+    sample_roles = ["SDE", "Data Scientist", "ML Engineer", "DevOps Engineer", "Data Analyst"]
 
-    # Identify company name column
-    company_col = None
-    for candidate in ("company_name", "company"):
-        if candidate in df.columns:
-            company_col = candidate
-            break
-    if company_col is None:
-        # Use first column that looks like a company
-        company_col = df.columns[0]
+    total = len(COMPANY_TIER_MAP) * len(sample_roles)
+    done = 0
 
-    # Identify title column
-    title_col = None
-    for candidate in ("title", "job_title"):
-        if candidate in df.columns:
-            title_col = candidate
-            break
+    for company_name, tier in COMPANY_TIER_MAP.items():
+        company_id = upsert_company(conn, company_name, tier, None)
+        company_count += 1
 
-    # Identify description column
-    desc_col = None
-    for candidate in ("description", "job_description"):
-        if candidate in df.columns:
-            desc_col = candidate
-            break
+        for role_title in sample_roles:
+            results = fetch_adzuna_for_company_role(company_name, role_title, app_id, app_key)
+            done += 1
 
-    # Rename to standard names
-    rename_map: dict[str, str] = {}
-    if company_col and company_col != "company_name":
-        rename_map[company_col] = "company_name"
-    if title_col and title_col != "role_title":
-        rename_map[title_col] = "role_title"
-    if desc_col and desc_col != "description":
-        rename_map[desc_col] = "description"
-    if rename_map:
-        df = df.rename(columns=rename_map)
+            if done % 50 == 0:
+                print(f"  [Adzuna] {done}/{total} queries done...")
 
-    # Ensure columns exist
-    if "company_name" not in df.columns:
-        df["company_name"] = ""
-    if "role_title" not in df.columns:
-        df["role_title"] = ""
-    if "description" not in df.columns:
-        df["description"] = ""
+            if not results:
+                continue
 
-    # Apply company name variants
-    df["company_name"] = df["company_name"].astype(str).replace(COMPANY_NAME_VARIANTS)
+            # Combine all descriptions for this company+role
+            combined_text = f"{role_title} " + " ".join(
+                r.get("description", "") or r.get("title", "") for r in results
+            )
+            skills = extract_skills(combined_text)
+            if not skills:
+                continue
 
-    # Drop rows where both title and description are null/empty
-    title_empty = df["role_title"].isna() | (df["role_title"].astype(str).str.strip() == "")
-    desc_empty = df["description"].isna() | (df["description"].astype(str).str.strip() == "")
-    df = df[~(title_empty & desc_empty)].copy()
+            role_id = insert_job_role(conn, company_id, role_title, None)
+            role_count += 1
 
-    # Map role titles to normalized roles
-    df["role_title"] = df["role_title"].astype(str).apply(normalize_role)
+            for skill_name, skill_category in skills:
+                insert_role_skill(conn, role_id, skill_name, skill_category, "adzuna")
+                upsert_skill_frequency(conn, skill_name, skill_category)
+                skill_record_count += 1
+                unique_skills.add(skill_name)
 
-    # Map companies to tiers
-    df["tier"] = df["company_name"].apply(get_tier)
-
-    # Normalize company names and role titles to title case
-    df["company_name"] = df["company_name"].apply(normalize_text)
-    df["role_title"] = df["role_title"].apply(normalize_text)
-
-    # Deduplicate on (company_name, role_title) — keep first
-    df = df.drop_duplicates(subset=["company_name", "role_title"], keep="first").copy()
-
-    # Drop rows with fewer than 3 extracted skills
-    def _skill_count(row: pd.Series) -> int:
-        text = " ".join([
-            str(row.get("role_title", "")),
-            str(row.get("description", "")),
-        ])
-        return len(extract_skills(text))
-
-    df["_skill_count"] = df.apply(_skill_count, axis=1)
-    df = df[df["_skill_count"] >= 3].drop(columns=["_skill_count"]).copy()
-
-    company_count = df["company_name"].nunique()
-    print(f"Cleaned rows: {len(df)} across {company_count} companies.")
-    return df
+    conn.commit()
+    print(f"[Adzuna] Done. Companies: {company_count} | Roles: {role_count} | Skills: {skill_record_count}")
+    return company_count, role_count, skill_record_count, unique_skills
 
 
-def fetch_adzuna(roles: list[str], pages: int = 3) -> list[dict]:
-    """Fetch job postings from the Adzuna API for the given roles.
+# ---------------------------------------------------------------------------
+# Step 3: Guaranteed fallback — all 91 companies, no API needed
+# ---------------------------------------------------------------------------
 
-    Handles non-2xx responses (logs and returns empty list for that role)
-    and 429 rate limiting (pauses 60 seconds, retries once).
-    """
-    load_dotenv()
-    app_id = os.environ.get("ADZUNA_APP_ID", "")
-    app_key = os.environ.get("ADZUNA_APP_KEY", "")
+def seed_via_fallback(conn) -> tuple[int, int, int, set]:
+    """Write hardcoded fallback data for every company. Never fails."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    from db import insert_job_role, insert_role_skill, upsert_company, upsert_skill_frequency
 
-    results: list[dict] = []
-    companies_seen: set[str] = set()
+    company_count = 0
+    role_count = 0
+    skill_record_count = 0
+    unique_skills: set[str] = set()
 
-    for role in roles:
-        url = (
-            f"https://api.adzuna.com/v1/api/jobs/in/search/1"
-            f"?app_id={app_id}&app_key={app_key}&what={requests.utils.quote(role)}&results_per_page=10"
-        )
-        for attempt in range(2):
-            try:
-                resp = requests.get(url, timeout=30)
-                if resp.status_code == 429:
-                    if attempt == 0:
-                        time.sleep(60)
-                        continue
-                    else:
-                        msg = f"Adzuna 429 rate limit for role '{role}' after retry."
-                        logging.error(msg)
-                        print(msg, file=sys.stderr)
-                        break
-                if not resp.ok:
-                    msg = f"Adzuna HTTP {resp.status_code} for role '{role}'."
-                    logging.error(msg)
-                    print(msg, file=sys.stderr)
-                    break
-                data = resp.json()
-                for job in data.get("results", []):
-                    title = job.get("title", "")
-                    description = job.get("description", "")
-                    company = job.get("company", {}).get("display_name", "") if isinstance(job.get("company"), dict) else str(job.get("company", ""))
-                    results.append({"title": title, "description": description, "company": company})
-                    if company:
-                        companies_seen.add(company)
-                break
-            except Exception as exc:
-                msg = f"Adzuna request error for role '{role}': {exc}"
-                logging.error(msg)
-                print(msg, file=sys.stderr)
-                break
+    for company_name, tier in COMPANY_TIER_MAP.items():
+        company_id = upsert_company(conn, company_name, tier, None)
+        company_count += 1
 
-    print(f"Adzuna gap fill complete. Companies now with data: {len(companies_seen)} / 91")
-    return results
+        tier_skills = FALLBACK_SKILLS.get(tier, FALLBACK_SKILLS["Indian IT"])
 
+        for role_title, skills in tier_skills.items():
+            # Check if this company+role already has data
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM job_roles jr "
+                "JOIN companies c ON jr.company_id = c.company_id "
+                "WHERE c.company_name = ? AND jr.role_title = ?",
+                (company_name, role_title)
+            ).fetchone()[0]
+            if existing:
+                continue
+
+            role_id = insert_job_role(conn, company_id, role_title, None)
+            role_count += 1
+
+            for skill_name, skill_category in skills:
+                insert_role_skill(conn, role_id, skill_name, skill_category, "fallback")
+                upsert_skill_frequency(conn, skill_name, skill_category)
+                skill_record_count += 1
+                unique_skills.add(skill_name)
+
+    conn.commit()
+    print(f"[Fallback] Done. Companies: {company_count} | Roles: {role_count} | Skills: {skill_record_count}")
+    return company_count, role_count, skill_record_count, unique_skills
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
 
 def run_pipeline() -> None:
-    """Orchestrate the full data pipeline: download → clean → Adzuna → DB writes."""
     try:
         _run_pipeline_inner()
     except SystemExit:
@@ -536,103 +520,62 @@ def run_pipeline() -> None:
 
 
 def _run_pipeline_inner() -> None:
-    """Inner pipeline logic (separated so run_pipeline can catch exceptions)."""
     sys.path.insert(0, os.path.dirname(__file__))
-    from db import create_schema, get_connection, insert_job_role, insert_role_skill, upsert_company, upsert_skill_frequency
-    from skill_extractor import extract_skills
+    from db import create_schema, get_connection
 
-    kaggle_path = "data/kaggle_raw.csv"
-
-    # Step 1: Download Kaggle data
-    download_kaggle(kaggle_path)
-
-    # Step 2: Clean and normalize
-    df = load_and_clean(kaggle_path)
-
-    # Step 3: Fetch Adzuna gap-fill data
-    roles_list = list(ROLE_MAPPING.values())
-    adzuna_records = fetch_adzuna(roles_list)
-
-    # Step 4: Connect to DB and create schema
     conn = get_connection()
     create_schema(conn)
 
-    company_count = 0
-    role_count = 0
-    skill_record_count = 0
-    unique_skills: set[str] = set()
+    total_companies = 0
+    total_roles = 0
+    total_skill_records = 0
+    all_unique_skills: set[str] = set()
 
-    # Step 5: Write Kaggle records
-    for _, row in df.iterrows():
-        company_name = str(row.get("company_name", "Unknown"))
-        role_title = str(row.get("role_title", "Other"))
-        tier = str(row.get("tier", "Other"))
-        description = str(row.get("description", ""))
+    # --- Step 3: Guaranteed fallback FIRST — all 91 companies, always fast ---
+    print("[Pipeline] Step 3: Running guaranteed fallback for all 91 companies...")
+    c, r, s, u = seed_via_fallback(conn)
+    total_companies = max(total_companies, c)
+    total_roles += r
+    total_skill_records += s
+    all_unique_skills |= u
 
-        company_id = upsert_company(conn, company_name, tier, None)
-        company_count += 1
+    # --- Step 2: Adzuna enrichment (best-effort, skip if slow) ---
+    load_dotenv()
+    app_id = os.environ.get("ADZUNA_APP_ID", "")
+    app_key = os.environ.get("ADZUNA_APP_KEY", "")
 
-        role_id = insert_job_role(conn, company_id, role_title, None)
-        role_count += 1
+    if app_id and app_key:
+        print("[Pipeline] Step 2: Enriching via Adzuna API (best-effort)...")
+        try:
+            import threading
+            result_box: list = []
 
-        skills = extract_skills(f"{role_title} {description}")
-        for skill_name, skill_category in skills:
-            insert_role_skill(conn, role_id, skill_name, skill_category, "kaggle")
-            upsert_skill_frequency(conn, skill_name, skill_category)
-            skill_record_count += 1
-            unique_skills.add(skill_name)
+            def _adzuna():
+                result_box.append(seed_via_adzuna(conn, app_id, app_key))
 
-    # Step 6: Write Adzuna records
-    for record in adzuna_records:
-        company_name = normalize_text(str(record.get("company", "Unknown")))
-        raw_title = str(record.get("title", ""))
-        role_title = normalize_text(normalize_role(raw_title))
-        description = str(record.get("description", ""))
-        tier = get_tier(company_name)
-
-        company_id = upsert_company(conn, company_name, tier, None)
-        role_id = insert_job_role(conn, company_id, role_title, None)
-        role_count += 1
-
-        skills = extract_skills(f"{role_title} {description}")
-        for skill_name, skill_category in skills:
-            insert_role_skill(conn, role_id, skill_name, skill_category, "adzuna")
-            upsert_skill_frequency(conn, skill_name, skill_category)
-            skill_record_count += 1
-            unique_skills.add(skill_name)
-
-    # Step 7: Industry standard fallback for companies with fewer than 3 roles
-    company_role_counts: dict[str, int] = {}
-    for _, row in df.iterrows():
-        cname = str(row.get("company_name", ""))
-        company_role_counts[cname] = company_role_counts.get(cname, 0) + 1
-
-    for tier_name, role_skills_map in INDUSTRY_STANDARD_FALLBACK.items():
-        # Find companies in this tier with fewer than 3 roles
-        for company_name, tier in COMPANY_TIER_MAP.items():
-            if tier != tier_name:
-                continue
-            normalized_name = normalize_text(company_name)
-            if company_role_counts.get(normalized_name, 0) >= 3:
-                continue
-            for role_title, skills in role_skills_map.items():
-                company_id = upsert_company(conn, normalized_name, tier_name, None)
-                role_id = insert_job_role(conn, company_id, role_title, None)
-                role_count += 1
-                for skill_name, skill_category in skills:
-                    insert_role_skill(conn, role_id, skill_name, skill_category, "kaggle")
-                    upsert_skill_frequency(conn, skill_name, skill_category)
-                    skill_record_count += 1
-                    unique_skills.add(skill_name)
+            t = threading.Thread(target=_adzuna, daemon=True)
+            t.start()
+            t.join(timeout=90)  # max 90 seconds for Adzuna enrichment
+            if result_box:
+                c2, r2, s2, u2 = result_box[0]
+                total_roles += r2
+                total_skill_records += s2
+                all_unique_skills |= u2
+            else:
+                print("[Pipeline] Adzuna timed out after 90s — fallback data is sufficient.")
+        except Exception as e:
+            print(f"[Pipeline] Adzuna enrichment skipped: {e}")
+    else:
+        print("[Pipeline] No Adzuna credentials — using fallback data only.")
 
     conn.close()
 
     print(
         f"Database write complete. "
-        f"Companies: {company_count} | "
-        f"Roles: {role_count} | "
-        f"Skill records: {skill_record_count} | "
-        f"Unique skills tracked: {len(unique_skills)}"
+        f"Companies: {total_companies} | "
+        f"Roles: {total_roles} | "
+        f"Skill records: {total_skill_records} | "
+        f"Unique skills tracked: {len(all_unique_skills)}"
     )
 
 

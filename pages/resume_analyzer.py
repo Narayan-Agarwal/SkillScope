@@ -68,13 +68,13 @@ def _render_match_gauge(match_score: float) -> None:
 def _render_step1_upload() -> tuple[list[tuple[str, str]] | None, str | None]:
     """Step 1: PDF upload and skill extraction. Returns (skills, error_msg)."""
     st.subheader('Step 1 — Upload Your Resume')
-    uploaded = st.file_uploader('Upload PDF resume (max 10 MB)', type=['pdf'], key='resume_upload')
+    uploaded = st.file_uploader('Upload PDF resume (max 5 MB)', type=['pdf'], key='resume_upload')
 
     if uploaded is None:
         return None, None
 
-    if uploaded.size > 10 * 1024 * 1024:
-        return None, 'File exceeds 10 MB limit. Please upload a smaller PDF.'
+    if uploaded.size > 5 * 1024 * 1024:
+        return None, 'File size exceeds 5MB. Please upload a smaller file.'
 
     try:
         raw_bytes = uploaded.read()

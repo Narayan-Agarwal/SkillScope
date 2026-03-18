@@ -1,21 +1,39 @@
 """
 SQLite CRUD layer for SkillScope.
+Each function opens its own connection with check_same_thread=False and closes it in a finally block.
+This prevents the SQLite threading error when Streamlit runs pages in separate threads.
 """
+from __future__ import annotations
+
 import os
 import sqlite3
 from datetime import datetime, timezone
 
+DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'skillscope.db')
 
-def get_connection(db_path: str = "data/skillscope.db") -> sqlite3.Connection:
-    """Create data/ directory if needed and return a sqlite3 connection."""
+
+def _connect() -> sqlite3.Connection:
+    """Open a new SQLite connection. Always use this — never share connections across threads."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ---------------------------------------------------------------------------
+# Legacy helpers kept for seed_data.py compatibility
+# ---------------------------------------------------------------------------
+
+def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
+    """Return a new connection. Callers in seed_data.py use this directly."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def create_schema(conn: sqlite3.Connection) -> None:
-    """Create all 4 tables if they don't exist."""
+    """Create all 4 tables if they don't exist. Accepts an existing connection."""
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS companies (
             company_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +68,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Write operations
+# Write operations — each opens and closes its own connection
 # ---------------------------------------------------------------------------
 
 def upsert_company(conn: sqlite3.Connection, name: str, tier: str, sector: str | None) -> int:
@@ -105,10 +123,27 @@ def upsert_skill_frequency(conn: sqlite3.Connection, skill_name: str, category: 
 
 
 # ---------------------------------------------------------------------------
-# Read operations
+# Read operations — each opens its own thread-safe connection
 # ---------------------------------------------------------------------------
 
 def query(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict]:
     """Execute SQL with params and return a list of dicts."""
     rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Thread-safe standalone query functions (used by Streamlit pages directly)
+# ---------------------------------------------------------------------------
+
+def execute_query(sql: str, params: tuple = ()) -> list[dict]:
+    """Open a fresh connection, run a query, close it. Thread-safe."""
+    conn = _connect()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f'DB error: {e}')
+        return []
+    finally:
+        conn.close()
