@@ -2,7 +2,7 @@
 
 > Job Market Intelligence Platform — discover what skills the market demands, explore company/role directories, and analyze your resume against real job data.
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-app-url.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://skillscopeplatform.streamlit.app)
 
 ---
 
