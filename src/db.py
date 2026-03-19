@@ -147,3 +147,50 @@ def execute_query(sql: str, params: tuple = ()) -> list[dict]:
         return []
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap from JSON seed file — runs on cold start if DB is empty
+# ---------------------------------------------------------------------------
+
+def bootstrap_from_json() -> None:
+    """If the companies table is empty, load all data from data/seed_data.json."""
+    import json
+
+    seed_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'seed_data.json')
+    if not os.path.exists(seed_path):
+        return
+
+    conn = _connect()
+    try:
+        count = conn.execute('SELECT COUNT(*) FROM companies').fetchone()[0]
+        if count > 0:
+            return  # already populated
+
+        with open(seed_path, 'r') as f:
+            data = json.load(f)
+
+        now = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
+
+        conn.executemany(
+            'INSERT OR IGNORE INTO companies (company_id, company_name, tier, industry_sector) VALUES (?, ?, ?, ?)',
+            [(r['company_id'], r['company_name'], r['tier'], r.get('industry_sector')) for r in data['companies']],
+        )
+        conn.executemany(
+            'INSERT OR IGNORE INTO job_roles (role_id, company_id, role_title, experience_level) VALUES (?, ?, ?, ?)',
+            [(r['role_id'], r['company_id'], r['role_title'], r.get('experience_level')) for r in data['job_roles']],
+        )
+        conn.executemany(
+            'INSERT OR IGNORE INTO role_skills (id, role_id, skill_name, skill_category, data_source) VALUES (?, ?, ?, ?, ?)',
+            [(r['id'], r['role_id'], r['skill_name'], r['skill_category'], r['data_source']) for r in data['role_skills']],
+        )
+        conn.executemany(
+            'INSERT OR IGNORE INTO skill_frequency (skill_id, skill_name, skill_category, frequency_count, last_updated) VALUES (?, ?, ?, ?, ?)',
+            [(r['skill_id'], r['skill_name'], r['skill_category'], r['frequency_count'], r.get('last_updated', now)) for r in data['skill_frequency']],
+        )
+        conn.commit()
+        print(f'[bootstrap] Loaded {len(data["companies"])} companies, {len(data["job_roles"])} roles from seed_data.json')
+    except Exception as e:
+        print(f'[bootstrap] Failed: {e}')
+    finally:
+        conn.close()
