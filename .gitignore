@@ -9,3 +9,5 @@ venv/
 *.egg-info/
 .hypothesis/
 .kiro/
+.venv/
+.pytest_cache/
